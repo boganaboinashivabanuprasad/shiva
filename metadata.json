@@ -1,0 +1,6 @@
+{
+  "name": "Samatulyam — Ganesha Digital Wellbeing Dashboard",
+  "description": "A child-friendly Indian devotional digital wellbeing dashboard with automated camera OCR screen-time detection, custom Voice of God audio upload, interactive voice training studio for 5-hour devotee sacred promises, printable Sankalpam Certificates with direct WhatsApp phone delivery, animated Ganesha blessings, and Arduino temple door hardware control.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

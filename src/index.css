@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-royal: 'Cinzel', serif;
+    --font-decorative: 'Cinzel Decorative', 'Cinzel', serif;
+    --font-marcellus: 'Marcellus', serif;
+    --font-sans: 'Plus Jakarta Sans', 'Outfit', sans-serif;
+    --font-telugu: 'Plus Jakarta Sans', sans-serif;
+    --font-telugu-serif: 'Marcellus', 'Cinzel', serif;
+    --font-telugu-tiro: 'Cinzel', 'Marcellus', serif;
+    --font-telugu-royal: 'Cinzel', 'Marcellus', serif;
+    --font-telugu-peddana: 'Marcellus', serif;
+    --font-telugu-suranna: 'Cinzel', serif;
+    --font-devanagari: 'Cinzel', 'Marcellus', serif;
+  }
+
+  body {
+    font-family: 'Marcellus', 'Plus Jakarta Sans', sans-serif;
+    background-color: #1a0505;
+    color: #f5f2ed;
+  }
+}
+
+.font-royal {
+  font-family: 'Cinzel', serif;
+}
+
+.font-decorative {
+  font-family: 'Cinzel Decorative', 'Cinzel', serif;
+}
+
+.font-marcellus {
+  font-family: 'Marcellus', serif;
+}
+
+.font-playfair {
+  font-family: 'Playfair Display', serif;
+}
+
+.font-script {
+  font-family: 'Great Vibes', cursive;
+}
+
+.font-sans-clean {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.font-telugu-noto {
+  font-family: 'Noto Serif Telugu', 'Marcellus', serif;
+}
+
+/* Gracefully map legacy classnames to refined English typography */
+.font-telugu {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.font-telugu-serif {
+  font-family: 'Marcellus', 'Cinzel', serif;
+}
+
+.font-telugu-tiro {
+  font-family: 'Cinzel', 'Marcellus', serif;
+}
+
+.font-telugu-royal {
+  font-family: 'Cinzel', 'Marcellus', serif;
+}
+
+.font-telugu-peddana {
+  font-family: 'Marcellus', serif;
+}
+
+.font-telugu-suranna {
+  font-family: 'Cinzel', serif;
+}
+
+.font-devanagari {
+  font-family: 'Cinzel', 'Marcellus', serif;
+}
+
+/* Royal Gold Text with pure solid rendering & rich glow (No clipping of diacritics/matras) */
+.text-royal-gold {
+  color: #ffd700;
+  text-shadow: 0 0 20px rgba(255, 215, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.95), 0 2px 4px rgba(0, 0, 0, 0.8);
+}
+
+.text-royal-gold-bright {
+  color: #fff2a3;
+  text-shadow: 0 0 25px rgba(255, 215, 0, 0.6), 0 4px 14px rgba(0, 0, 0, 0.95), 0 2px 4px rgba(0, 0, 0, 0.8);
+}
+
+/* Gold foil and editorial devotional text gradient with safe line height and padding */
+.text-gold-gradient {
+  background: linear-gradient(135deg, #ffd700 0%, #ffea80 35%, #d4af37 70%, #aa820a 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  padding-top: 0.1em;
+  padding-bottom: 0.15em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.text-gold-bright {
+  background: linear-gradient(180deg, #ffffff 0%, #fff2a3 30%, #ffd700 70%, #d4af37 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-copper-gradient {
+  background: linear-gradient(135deg, #fca5a5 0%, #f87171 50%, #dc2626 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Temple gold border accents */
+.border-gold-glow {
+  border-color: rgba(212, 175, 55, 0.45);
+  box-shadow: 0 0 20px rgba(212, 175, 55, 0.25), inset 0 0 15px rgba(212, 175, 55, 0.08);
+}
+
+/* Dark Sacred Velvet Temple Cards - 100% Solid Opaque (No transparency) */
+.card-temple {
+  background: #220710;
+  border: 1px solid rgba(212, 175, 55, 0.45);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8), 0 0 20px rgba(212, 175, 55, 0.1);
+}
+
+.card-temple-gold {
+  background: #2d0b16;
+  border: 1px solid #ffd700;
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.9), 0 0 25px rgba(255, 215, 0, 0.2);
+}
+
+/* Subtle breathing aura glow */
+@keyframes aura-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.7;
+    filter: drop-shadow(0 0 25px rgba(255, 215, 0, 0.6));
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.95;
+    filter: drop-shadow(0 0 45px rgba(255, 215, 0, 0.9));
+  }
+}
+
+.animate-aura {
+  animation: aura-pulse 4s ease-in-out infinite;
+}
+
+@keyframes divine-float {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(0.5deg);
+  }
+}
+
+.animate-float {
+  animation: divine-float 5s ease-in-out infinite;
+}
+
+@keyframes ray-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-rays {
+  animation: ray-rotate 60s linear infinite;
+}
+
+/* Custom scrollbars with refined gold trim */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(20, 5, 8, 0.8);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(212, 175, 55, 0.45);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 215, 0, 0.75);
+}
+
