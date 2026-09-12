@@ -16,7 +16,6 @@ import {
 import confetti from 'canvas-confetti';
 import { DashboardSettings } from '../types';
 import { soundService } from '../services/soundService';
-import { arduinoService } from '../services/arduinoService';
 import { ASSETS } from '../assets';
 import { verifyCompleteSentence, SentenceMatchResult } from '../services/voiceSentenceMatcher';
 
@@ -29,7 +28,7 @@ interface SacredVoicePromiseModalProps {
   onCancel?: () => void;
 }
 
-type ModalStage = 'door_moving' | 'god_speaking' | 'user_speaking' | 'accepted';
+type ModalStage = 'god_speaking' | 'user_speaking' | 'accepted';
 
 export function SacredVoicePromiseModal({
   isOpen,
@@ -39,9 +38,7 @@ export function SacredVoicePromiseModal({
   onPromiseAccepted,
   onCancel,
 }: SacredVoicePromiseModalProps) {
-  const [currentStage, setCurrentStage] = useState<ModalStage>('door_moving');
-  const [doorProgress, setDoorProgress] = useState<number>(0);
-  const [doorPhaseText, setDoorPhaseText] = useState<string>('Opening partially (Direction 1: 3s)...');
+  const [currentStage, setCurrentStage] = useState<ModalStage>('god_speaking');
   const [isGodSpeaking, setIsGodSpeaking] = useState<boolean>(false);
   const [isListening, setIsListening] = useState<boolean>(false);
   const [voiceTranscript, setVoiceTranscript] = useState<string>('');
@@ -59,18 +56,15 @@ export function SacredVoicePromiseModal({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const hasTriggeredAcceptRef = useRef<boolean>(false);
-  const doorTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const acceptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRef = useRef(false);
   const speechEvaluationDebounceRef = useRef<NodeJS.Timeout | null>(null);
-
-  const t5p1 = settings?.time5PlusDir1Ms ?? 3000;
-  const t5p2 = settings?.time5PlusDir2Ms ?? 4000;
-  const totalDoorTime = t5p1 + t5p2;
 
   // Cleanup all audio and timers
   const cleanupAudio = () => {
-    if (doorTimerRef.current) {
-      clearInterval(doorTimerRef.current);
-      doorTimerRef.current = null;
+    if (acceptTimerRef.current) {
+      clearTimeout(acceptTimerRef.current);
+      acceptTimerRef.current = null;
     }
 
     if (speechEvaluationDebounceRef.current) {
@@ -110,42 +104,9 @@ export function SacredVoicePromiseModal({
     }
   };
 
-  // Stage 1: Door Opens a bit and Closes
-  const startDoorMotionStage = () => {
-    setCurrentStage('door_moving');
-    setDoorProgress(0);
-
-    const startTime = Date.now();
-    doorTimerRef.current = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      const progress = Math.min(100, Math.round((elapsed / totalDoorTime) * 100));
-      setDoorProgress(progress);
-
-      if (elapsed < t5p1) {
-        setDoorPhaseText(`Door opening a bit in Direction 1 (${((t5p1 - elapsed) / 1000).toFixed(1)}s remaining)...`);
-      } else if (elapsed < totalDoorTime) {
-        setDoorPhaseText(`Door closing back in Direction 2 (${((totalDoorTime - elapsed) / 1000).toFixed(1)}s remaining)...`);
-      } else {
-        // Door has finished opening a bit and closing
-        if (doorTimerRef.current) {
-          clearInterval(doorTimerRef.current);
-          doorTimerRef.current = null;
-        }
-        setDoorPhaseText('Doors are closed. Lord Ganesha will now ask for your sacred promise...');
-        setTimeout(() => {
-          startGodSpeakingStage();
-        }, 600);
-      }
-    }, 100);
-  };
-
   // Stage 2: Divine Voice of God asking for promise
   const startGodSpeakingStage = () => {
-    if (doorTimerRef.current) {
-      clearInterval(doorTimerRef.current);
-      doorTimerRef.current = null;
-    }
-
+    if (!activeRef.current) return;
     setCurrentStage('god_speaking');
     setIsGodSpeaking(true);
     soundService.stopSpeech();
@@ -154,6 +115,7 @@ export function SacredVoicePromiseModal({
       settings,
       () => setIsGodSpeaking(true),
       () => {
+        if (!activeRef.current) return;
         setIsGodSpeaking(false);
         // Automatically proceed to user voice input stage
         startListeningStage();
@@ -163,7 +125,7 @@ export function SacredVoicePromiseModal({
 
   // Stage 3: Listen for User's Voice Input
   const startListeningStage = async () => {
-    if (hasTriggeredAcceptRef.current) return;
+    if (!activeRef.current || hasTriggeredAcceptRef.current) return;
     setCurrentStage('user_speaking');
     setIsGodSpeaking(false);
     setIsListening(true);
@@ -239,7 +201,7 @@ export function SacredVoicePromiseModal({
         };
 
         recognition.onend = () => {
-          if (isListening && !hasTriggeredAcceptRef.current) {
+          if (activeRef.current && isListening && !hasTriggeredAcceptRef.current) {
             try {
               recognition.start();
             } catch {}
@@ -257,6 +219,10 @@ export function SacredVoicePromiseModal({
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (!activeRef.current || hasTriggeredAcceptRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         mediaStreamRef.current = stream;
 
         const AudioCtx =
@@ -273,7 +239,7 @@ export function SacredVoicePromiseModal({
           const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
           const checkVolume = () => {
-            if (hasTriggeredAcceptRef.current) return;
+            if (!activeRef.current || hasTriggeredAcceptRef.current) return;
             analyser.getByteFrequencyData(dataArray);
 
             let sum = 0;
@@ -297,7 +263,7 @@ export function SacredVoicePromiseModal({
 
   // Stage 4: Devotee Voice Input Accepted -> Door Opens
   const acceptPromise = (customText?: string) => {
-    if (hasTriggeredAcceptRef.current) return;
+    if (!activeRef.current || hasTriggeredAcceptRef.current) return;
     hasTriggeredAcceptRef.current = true;
 
     cleanupAudio();
@@ -321,20 +287,18 @@ export function SacredVoicePromiseModal({
       soundService.playPromiseAcceptedBlessing();
     }
 
-    // Transmit Arduino Command to Open Door (Direction 1 for 8 seconds)
-    arduinoService.sendCommand('OPEN_AFTER_PROMISE');
-
-    // Proceed to open Darshanam video modal after blessing
-    setTimeout(() => {
-      onPromiseAccepted();
+    // The scanner sends the single five-second command after this acceptance.
+    acceptTimerRef.current = setTimeout(() => {
+      if (activeRef.current) onPromiseAccepted();
     }, 2200);
   };
 
   // Initialize sequence when modal opens
   useEffect(() => {
+    activeRef.current = isOpen;
     if (!isOpen) {
       cleanupAudio();
-      setCurrentStage('door_moving');
+      setCurrentStage('god_speaking');
       hasTriggeredAcceptRef.current = false;
       setVoiceTranscript('');
       return;
@@ -343,10 +307,11 @@ export function SacredVoicePromiseModal({
     hasTriggeredAcceptRef.current = false;
     setVoiceTranscript('');
 
-    // Start Sequence: Step 1 (Door Opens a bit & Closes)
-    startDoorMotionStage();
+    // The scanner opens this modal only after the first five-second motion completes.
+    startGodSpeakingStage();
 
     return () => {
+      activeRef.current = false;
       cleanupAudio();
       soundService.stopSpeech();
     };
@@ -383,13 +348,9 @@ export function SacredVoicePromiseModal({
           {/* 3-Step Sequence Stepper Indicator */}
           <div className="relative z-10 mt-3 grid grid-cols-3 gap-1 text-[11px] font-bold">
             <div
-              className={`flex items-center justify-center gap-1 rounded-lg py-1.5 px-1 border transition-all ${
-                currentStage === 'door_moving'
-                  ? 'border-amber-400 bg-amber-950/80 text-amber-300 shadow-md animate-pulse'
-                  : 'border-emerald-500/50 bg-emerald-950/40 text-emerald-300'
-              }`}
+              className="flex items-center justify-center gap-1 rounded-lg py-1.5 px-1 border border-emerald-500/50 bg-emerald-950/40 text-emerald-300"
             >
-              <span>1. Door Open & Close</span>
+              <span>1. Opened for 5s</span>
             </div>
 
             <div
@@ -416,42 +377,6 @@ export function SacredVoicePromiseModal({
               <span>3. Voice Input & Open</span>
             </div>
           </div>
-
-          {/* Stage 1: Door Open A Bit and Close Progress Banner */}
-          {currentStage === 'door_moving' && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="relative z-10 mt-3 rounded-2xl border border-amber-400/60 bg-amber-950/60 p-3 text-center space-y-2"
-            >
-              <div className="flex items-center justify-between text-xs font-bold text-amber-300">
-                <span className="flex items-center gap-1.5">
-                  <DoorOpen className="h-4 w-4 text-amber-400 animate-spin" />
-                  <span>Physical Door Motion in Progress:</span>
-                </span>
-                <span className="font-mono text-[11px] text-[#ffd700]">{doorProgress}%</span>
-              </div>
-
-              {/* Progress bar */}
-              <div className="h-2 w-full rounded-full bg-black/60 overflow-hidden border border-amber-400/40">
-                <div
-                  className="h-full bg-gradient-to-r from-amber-400 to-rose-400 transition-all duration-150 rounded-full"
-                  style={{ width: `${doorProgress}%` }}
-                />
-              </div>
-
-              <p className="text-[11px] text-amber-100 font-medium">{doorPhaseText}</p>
-
-              <button
-                type="button"
-                onClick={startGodSpeakingStage}
-                className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-[#ffd700] hover:underline"
-              >
-                <span>Skip motion & ask promise immediately</span>
-                <ArrowRight className="h-3 w-3" />
-              </button>
-            </motion.div>
-          )}
 
           {/* Deity Portrait with Golden Aura */}
           <div className="relative z-10 my-3 flex flex-col items-center">

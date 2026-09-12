@@ -278,6 +278,38 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
   const [previewVideo, setPreviewVideo] = useState<{ title: string; url: string } | null>(null);
   const [isPlayingPromiseAudio, setIsPlayingPromiseAudio] = useState<boolean>(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [cameraSetupStatus, setCameraSetupStatus] = useState<string>('');
+  const [cameraSetupBusy, setCameraSetupBusy] = useState(false);
+  const cameraPermissionPending = useRef(false);
+
+  const refreshCameraDevices = async (requestPermission = false) => {
+    if (requestPermission && cameraPermissionPending.current) return;
+    let permissionStream: MediaStream | null = null;
+    if (requestPermission) { cameraPermissionPending.current = true; setCameraSetupBusy(true); }
+    try {
+      if (requestPermission) {
+        permissionStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter((device) => device.kind === 'videoinput');
+      setCameraDevices(cameras);
+      setCameraSetupStatus(cameras.length ? `${cameras.length} camera(s) detected.` : 'No camera detected.');
+    } catch (error: any) {
+      setCameraSetupStatus(`Camera access failed: ${error?.message || 'permission denied'}`);
+    } finally {
+      permissionStream?.getTracks().forEach((track) => track.stop());
+      if (requestPermission) { cameraPermissionPending.current = false; setCameraSetupBusy(false); }
+    }
+  };
+
+  useEffect(() => {
+    if (!navigator.mediaDevices) return;
+    void refreshCameraDevices(false);
+    const handleDeviceChange = () => void refreshCameraDevices(false);
+    navigator.mediaDevices.addEventListener?.('devicechange', handleDeviceChange);
+    return () => navigator.mediaDevices.removeEventListener?.('devicechange', handleDeviceChange);
+  }, []);
 
   // 5-Hour Sacred Promise Voice Training State & Refs
   const [isTrainingVoice, setIsTrainingVoice] = useState<boolean>(false);
@@ -1252,6 +1284,55 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
           </div>
         </div>
 
+        {/* Camera selection persists on this browser and is reused by the scanner page. */}
+        <div className="card-temple p-5 space-y-4" id="section-camera-selection">
+          <div className="flex items-center justify-between border-b border-[#ffd700]/20 pb-2">
+            <div className="flex items-center space-x-2">
+              <Video className="h-4 w-4 text-[#ffd700]" />
+              <h3 className="font-royal text-base font-bold text-[#ffd700] tracking-wide">
+                Preferred Camera
+              </h3>
+            </div>
+            <span className="text-[10px] text-emerald-400 font-mono">Saved on this device</span>
+          </div>
+
+          <p className="text-xs text-[#e8cba4]/75">
+            Allow camera access and select your USB webcam. This browser remembers the selection and uses it whenever the scanner opens.
+          </p>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
+            <select
+              aria-label="Preferred camera"
+              value={form.selectedCameraId || ''}
+              onChange={(event) => updateAndAutoSave({ selectedCameraId: event.target.value || undefined })}
+              className="w-full rounded-xl border border-[#ffd700]/40 bg-[#140306] px-3 py-2.5 text-sm text-white focus:border-[#ffd700] focus:outline-none"
+            >
+              <option value="">Automatic/default camera</option>
+              {form.selectedCameraId && !cameraDevices.some((camera) => camera.deviceId === form.selectedCameraId) && (
+                <option value={form.selectedCameraId}>Saved webcam (unavailable or permission needed)</option>
+              )}
+              {cameraDevices.map((camera, index) => (
+                <option key={camera.deviceId} value={camera.deviceId}>
+                  {camera.label || `Camera ${index + 1}`}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => void refreshCameraDevices(true)}
+              disabled={cameraSetupBusy}
+              className="rounded-xl border border-[#ffd700] bg-gradient-to-r from-[#9e1c36] to-[#801429] px-4 py-2.5 text-xs font-bold text-white"
+            >
+              {cameraSetupBusy ? 'Waiting for camera permission...' : 'Allow & Detect Cameras'}
+            </button>
+          </div>
+
+          {cameraSetupStatus && <p className="text-[11px] text-emerald-300">{cameraSetupStatus}</p>}
+          <p className="text-[10px] text-[#e8cba4]/55">
+            Chrome still controls site permission. If access is blocked, click the lock icon beside the website address and set Camera to Allow.
+          </p>
+        </div>
+
         {/* Section 1: Screen-Time Thresholds */}
         <div className="card-temple p-5 space-y-4">
           <div className="flex items-center justify-between border-b border-[#ffd700]/20 pb-2">
@@ -1471,6 +1552,9 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
           </div>
 
           {/* Quick Reference Summary Card */}
+          <p className="text-xs text-[#ffd700]">
+            Manual and automatic scans of 5+ hours use a fixed 5-second opening before the promise and another 5-second opening after acceptance. The legacy cycle controls below apply to hardware test commands.
+          </p>
           <div className="rounded-2xl border border-[#ffd700]/40 bg-[#16060a]/95 p-4 text-xs font-mono shadow-inner space-y-2.5">
             <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
               <span className="text-[11px] uppercase tracking-wider text-[#ffd700] font-bold">
@@ -1490,12 +1574,12 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
                 <span className="text-sky-400 font-bold">Direction 1 (Slow): {((form.time3To5Dir1Ms ?? 8000) / 1000).toFixed(1)}s ({form.time3To5Dir1Ms ?? 8000}ms)</span>
               </div>
               <div className="bg-black/30 p-2 rounded-lg border border-white/5">
-                <span className="text-white/60 block text-[10px]">5+ Hours (Pre-Promise):</span>
-                <span className="text-amber-400 font-bold">Dir 1: {((form.time5PlusDir1Ms ?? 3000) / 1000).toFixed(1)}s &rarr; Dir 2: {((form.time5PlusDir2Ms ?? 4000) / 1000).toFixed(1)}s</span>
+                <span className="text-white/60 block text-[10px]">Scanner: 5+ Hours (Before Promise):</span>
+                <span className="text-amber-400 font-bold">Direction 1: 5s (5000ms)</span>
               </div>
               <div className="bg-black/30 p-2 rounded-lg border border-white/5">
-                <span className="text-white/60 block text-[10px]">After Promise:</span>
-                <span className="text-purple-300 font-bold">Direction 1: {((form.time5PlusPromiseDir1Ms ?? 8000) / 1000).toFixed(1)}s ({form.time5PlusPromiseDir1Ms ?? 8000}ms)</span>
+                <span className="text-white/60 block text-[10px]">Scanner: After Promise:</span>
+                <span className="text-purple-300 font-bold">Direction 1: 5s (5000ms)</span>
               </div>
               <div className="bg-black/30 p-2 rounded-lg border border-white/5">
                 <span className="text-white/60 block text-[10px]">Return to Home Page:</span>
@@ -1543,7 +1627,7 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
               <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
                 <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wide flex items-center space-x-1.5">
                   <span className="h-2 w-2 rounded-full bg-amber-400" />
-                  <span>5+ Hours Screen Time (Overuse &amp; Promise Sequence)</span>
+                  <span>Hardware Tests: Legacy Peek &amp; Promise Timings</span>
                 </h4>
                 <span className="text-[11px] text-amber-400 font-mono font-bold">
                   Dir 1: {((form.time5PlusDir1Ms ?? 3000) / 1000).toFixed(1)}s &rarr; Dir 2: {((form.time5PlusDir2Ms ?? 4000) / 1000).toFixed(1)}s
@@ -1582,9 +1666,9 @@ export function SettingsView({ settings, onUpdateSettings }: SettingsViewProps) 
                 {/* 5+ Hours After Promise */}
                 <MotorTimingDigitControl
                   id="time5PlusPromiseDir1Ms"
-                  label="After Devotee Sacred Promise Run Time"
+                  label="Hardware Test: After Promise Run Time"
                   directionBadge="Direction 1 • Sacred Blessing Run"
-                  description="Duration motor runs in Direction 1 after user accepts the sacred vow. Default: 8 sec (8000 ms)."
+                  description="Duration for hardware test commands. Scanner promise openings always use 5 seconds."
                   theme="purple"
                   valueMs={form.time5PlusPromiseDir1Ms ?? 8000}
                   onChangeMs={(val) => updateAndAutoSave({ time5PlusPromiseDir1Ms: val })}

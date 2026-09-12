@@ -20,6 +20,8 @@ import { ocrService } from '../services/ocrService';
 import { arduinoService } from '../services/arduinoService';
 import { soundService } from '../services/soundService';
 import { storageService } from '../services/storageService';
+import { CameraSession, CameraState } from '../services/cameraSession';
+import { ScanSession } from '../services/scanSession';
 import { DashboardSettings, ScanRecord, ScreenTimeCategory, CATEGORY_DETAILS, AppPage, UserAgeGroup } from '../types';
 import { ASSETS } from '../assets';
 import { GaneshaFullPopupModal } from './GaneshaFullPopupModal';
@@ -51,13 +53,22 @@ export function LiveScanner({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const [cameraActive, setCameraActive] = useState<boolean>(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [camera, setCamera] = useState<CameraState>({ stream: null, devices: [], activeId: '', error: null });
+  const cameraSession = useRef<CameraSession | null>(null);
+  const scanSession = useRef(new ScanSession());
+  const mounted = useRef(true);
+  const promiseStage = useRef<'before' | 'waiting' | 'after' | null>(null);
+  const actionGeneration = useRef(0);
+  const cameraActive = !!camera.stream;
+  const cameraError = camera.error;
+  const availableCameras = camera.devices;
+  const activeCameraId = camera.activeId;
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [isProcessingOcr, setIsProcessingOcr] = useState<boolean>(false);
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
-  const [scanCooldown, setScanCooldown] = useState<boolean>(false);
+  const [scanMode, setScanMode] = useState<'manual' | 'auto'>('manual');
+  const [scanComplete, setScanComplete] = useState(false);
 
   // Live Detection State
   const [activeCategory, setActiveCategory] = useState<ScreenTimeCategory | null>(null);
@@ -86,27 +97,46 @@ export function LiveScanner({
   const [isDoorOpen, setIsDoorOpen] = useState<boolean>(arduinoService.getIsDoorOpen());
 
   useEffect(() => {
+    mounted.current = true;
     // Pre-warm fallback OCR worker in the background
     ocrService.getWorker().catch(() => {});
 
     const unsubscribe = arduinoService.subscribe((st) => {
       setDoorMotion(st.doorMotion);
       setIsDoorOpen(st.isDoorOpen);
+      if (promiseStage.current === 'before' && st.doorMotion === 'open') {
+        promiseStage.current = 'waiting';
+        setIsPromiseModalOpen(true);
+      }
     });
     return () => {
       unsubscribe();
+      mounted.current = false;
+      ++actionGeneration.current;
+      scanSession.current.cancel();
+      promiseStage.current = null;
     };
   }, []);
 
   // When devotee takes voice vow for 5+ hours screen time
-  const handlePromiseAccepted = () => {
-    setIsPromiseModalOpen(false);
+  const handlePromiseAccepted = async () => {
     const pending = pendingPromiseDetection;
-    if (!pending) return;
+    if (!pending || promiseStage.current !== 'waiting') return;
+    const action = ++actionGeneration.current;
+    promiseStage.current = 'after';
+    setIsPromiseModalOpen(false);
 
     // After promise: First motor runs and relay turns ON
-    arduinoService.sendCommand('OPEN_AFTER_PROMISE');
-    arduinoService.sendCommand('RELAY_ON');
+    const sent = await arduinoService.sendCommand('OPEN_AFTER_PROMISE', 5000);
+    if (!mounted.current || action !== actionGeneration.current) return;
+    if (!sent) {
+      setStatusMessage('Motor command failed. Reconnect the controller before trying again.');
+      promiseStage.current = null;
+      setPendingPromiseDetection(null);
+      return;
+    }
+    await arduinoService.sendCommand('RELAY_ON');
+    if (!mounted.current || action !== actionGeneration.current) return;
     soundService.playDoorOpenSound();
 
     // Save record to local storage
@@ -118,7 +148,7 @@ export function LiveScanner({
       teluguMessage: pending.details.teluguMessage,
       englishMessage: pending.details.englishMessage,
       arduinoCommand: 'OPEN_AFTER_PROMISE',
-      doorAction: 'After Promise: Motor runs 8s in Direction 1',
+      doorAction: 'After Promise: Motor runs 5s in Direction 1',
       confidence: pending.confidence,
       source: pending.source,
     });
@@ -126,29 +156,21 @@ export function LiveScanner({
     if (onScanCompleted) onScanCompleted(newRecord);
 
     setStatusMessage(
-      `॥ OM VIGHNARAJAYA NAMAHA ॥ Sacred vow accepted! Motor running in Direction 1 for 8 seconds.`
+      `॥ OM VIGHNARAJAYA NAMAHA ॥ Sacred vow accepted! Motors opening doors for 5 seconds.`
     );
 
     // Open Full Screen Divine Ganesha Popup Modal with Video Feedback
     setIsGaneshaModalOpen(true);
     setPendingPromiseDetection(null);
 
-    // Cooldown to avoid accidental immediate re-triggers
-    setScanCooldown(true);
-    setTimeout(() => setScanCooldown(false), 500);
   };
 
   const handleCancelPromise = () => {
+    ++actionGeneration.current;
     setIsPromiseModalOpen(false);
+    promiseStage.current = null;
     setPendingPromiseDetection(null);
-    setStatusMessage('Sacred promise cancelled.');
-    if (videoRef.current) {
-      try {
-        videoRef.current.play();
-      } catch {
-        // Ignore
-      }
-    }
+    setStatusMessage('Sacred promise cancelled. Choose Next Scan when ready.');
   };
 
   // Video Completed handler:
@@ -191,72 +213,49 @@ export function LiveScanner({
     }
   };
 
-  // Stream reference
-  const streamRef = useRef<MediaStream | null>(null);
-
-  // Start Camera
-  const startCamera = useCallback(async () => {
-    setCameraError(null);
-    try {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode,
-          width: { ideal: 1920, min: 640 },
-          height: { ideal: 1080, min: 480 },
-        },
-        audio: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(() => {});
-      }
-      setCameraActive(true);
-      setStatusMessage('Camera is ready. Click the Camera Scan button below.');
-    } catch (err: any) {
-      console.warn('Camera start error:', err);
-      setCameraError('Unable to start camera. Please use Screen Capture or Photo Upload.');
-      setCameraActive(false);
-      setStatusMessage('Camera unavailable. Click "Screen Capture" or "Upload" to scan.');
-    }
-  }, [facingMode]);
-
-  // Ensure all voice and speech is completely silent in scan phone window as requested by devotee
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    setCameraActive(false);
-  }, []);
+  const startCamera = () => cameraSession.current?.start();
 
   useEffect(() => {
-    // Stop any residual or active speech immediately on entering scan window
     soundService.stopSpeech();
-    startCamera();
-
-    return () => {
-      soundService.stopSpeech();
-      stopCamera();
+    scanSession.current.cancel();
+    const session = new CameraSession(navigator.mediaDevices, settings.selectedCameraId || '', facingMode, setCamera);
+    cameraSession.current = session;
+    void session.start();
+    const resume = () => {
+      if (document.visibilityState === 'visible') {
+        void session.start();
+        void videoRef.current?.play().catch(() => {});
+      } else {
+        scanSession.current.cancel();
+      }
     };
-  }, [startCamera, stopCamera]);
+    document.addEventListener('visibilitychange', resume);
+    return () => {
+      session.dispose();
+      document.removeEventListener('visibilitychange', resume);
+      soundService.stopSpeech();
+    };
+  }, [settings.selectedCameraId, facingMode]);
+
+  useEffect(() => {
+    if (!videoRef.current) return;
+    videoRef.current.srcObject = camera.stream;
+    if (camera.stream) void videoRef.current.play().catch(() => {});
+    else scanSession.current.cancel();
+  }, [camera.stream]);
 
   // Handle successful detection
   const handleSuccessfulDetection = useCallback(
-    (
+    async (
       timeMinutes: number,
       formattedTime: string,
       confidence: number,
       source: ScanRecord['source'] = 'camera_manual',
       photoUrl?: string
     ) => {
+      if (!mounted.current || !scanSession.current.complete()) return;
+      const action = ++actionGeneration.current;
+      setScanComplete(true);
       const category = ocrService.classifyMinutes(
         timeMinutes,
         settings.healthyThresholdHours,
@@ -276,13 +275,6 @@ export function LiveScanner({
       // Stop any speech
       soundService.stopSpeech();
 
-      // Pause camera feed
-      if (videoRef.current) {
-        try {
-          videoRef.current.pause();
-        } catch {}
-      }
-
       // Sounds and celebration for scan recognition
       if (soundEnabled) {
         soundService.playTempleBell(1.15);
@@ -295,11 +287,7 @@ export function LiveScanner({
       }
 
       if (category === '5_PLUS_HOURS') {
-        // 5+ Hours:
-        // "if 5+ motor should run for 3 sec in direction 1 and run for 4 sec in 2 direction after promiss motor should run in 1 direction for 8 sec"
-        arduinoService.sendCommand('OPEN_5_PLUS');
-        soundService.playDoorOpenSound();
-
+        promiseStage.current = 'before';
         setPendingPromiseDetection({
           category,
           timeMinutes,
@@ -309,12 +297,25 @@ export function LiveScanner({
           details: details || CATEGORY_DETAILS['5_PLUS_HOURS'],
         });
 
-        // Prompt user for sacred voice promise
-        setIsPromiseModalOpen(true);
+        setStatusMessage('5+ hours detected. Opening for 5 seconds before the sacred promise...');
+        const sent = await arduinoService.sendCommand('OPEN_FULL', 5000);
+        if (!mounted.current || action !== actionGeneration.current) return;
+        if (!sent) {
+          promiseStage.current = null;
+          setPendingPromiseDetection(null);
+          setStatusMessage('Motor command failed. Reconnect the controller before trying again.');
+          return;
+        }
+        await arduinoService.sendCommand('RELAY_ON');
+        if (!mounted.current || action !== actionGeneration.current) return;
+        soundService.playDoorOpenSound();
       } else if (category === '3_TO_5_HOURS') {
         // 3-5 Hours: First motor runs and relay turns ON
-        arduinoService.sendCommand('OPEN_3_5');
-        arduinoService.sendCommand('RELAY_ON');
+        const sent = await arduinoService.sendCommand('OPEN_3_5');
+        if (!mounted.current || action !== actionGeneration.current) return;
+        if (!sent) { setStatusMessage('Motor command failed. Reconnect the controller.'); return; }
+        await arduinoService.sendCommand('RELAY_ON');
+        if (!mounted.current || action !== actionGeneration.current) return;
         soundService.playDoorOpenSound();
 
         const newRecord = storageService.addScanRecord({
@@ -335,8 +336,11 @@ export function LiveScanner({
         setIsGaneshaModalOpen(true);
       } else {
         // 0-3 Hours (Healthy / default for every user): First motor runs and relay turns ON
-        arduinoService.sendCommand('OPEN_0_3');
-        arduinoService.sendCommand('RELAY_ON');
+        const sent = await arduinoService.sendCommand('OPEN_0_3');
+        if (!mounted.current || action !== actionGeneration.current) return;
+        if (!sent) { setStatusMessage('Motor command failed. Reconnect the controller.'); return; }
+        await arduinoService.sendCommand('RELAY_ON');
+        if (!mounted.current || action !== actionGeneration.current) return;
         soundService.playDoorOpenSound();
 
         const newRecord = storageService.addScanRecord({
@@ -357,34 +361,42 @@ export function LiveScanner({
         setIsGaneshaModalOpen(true);
       }
 
-      // Cooldown to avoid accidental immediate re-triggers
-      setScanCooldown(true);
-      setTimeout(() => setScanCooldown(false), 500);
     },
     [settings, soundEnabled, onScanCompleted, ageGroup]
   );
 
   // Manual Door Open & Case Trigger handlers
   const handleManualDoorCase = (caseType: '0_3' | '3_5' | '5_plus' | 'promise' | 'close') => {
+    if (caseType !== 'close' && (scanSession.current.isBusy() || scanSession.current.isComplete() ||
+      ['opening', 'closing'].includes(arduinoService.getDoorMotion()))) return;
     soundService.playScanBeep();
 
     if (caseType === '0_3') {
       setStatusMessage('Case 1 Manual: 0 - 3 Hours (Healthy) • Motor running 8s Dir 1. Opening Doors...');
-      handleSuccessfulDetection(90, '1h 30m', 99, 'manual_preset');
+      void handleSuccessfulDetection(90, '1h 30m', 100, 'demo_trigger');
     } else if (caseType === '3_5') {
       setStatusMessage('Case 2 Manual: 3 - 5 Hours (Warning) • Motor running 8s Dir 1 SLOW. Opening Doors...');
-      handleSuccessfulDetection(240, '4h 00m', 99, 'manual_preset');
+      void handleSuccessfulDetection(240, '4h 00m', 100, 'demo_trigger');
     } else if (caseType === '5_plus') {
-      setStatusMessage('Case 3 Manual: 5+ Hours (Overuse) • Motor running 3s Dir 1 & 4s Dir 2. Partial peek...');
-      handleSuccessfulDetection(360, '6h 00m', 99, 'manual_preset');
+      setStatusMessage('Case 3 Manual: 5+ Hours • Motors opening doors for 5 seconds before promise...');
+      void handleSuccessfulDetection(360, '6h 00m', 100, 'demo_trigger');
     } else if (caseType === 'promise') {
-      setStatusMessage('Case 4 Manual: After Promise • Motor running 8s in Dir 1. Full Sacred Darshanam...');
-      arduinoService.sendCommand('OPEN_AFTER_PROMISE');
+      scanSession.current.complete();
+      setScanComplete(true);
+      setStatusMessage('Case 4 Manual: After Promise • Motors opening doors for 5 seconds...');
+      arduinoService.sendCommand('OPEN_AFTER_PROMISE', 5000);
       soundService.playDoorOpenSound();
       setActiveCategory('5_PLUS_HOURS');
       setActiveScreenTimeString('5+h (Vow Accepted)');
       setIsGaneshaModalOpen(true);
     } else if (caseType === 'close') {
+      ++actionGeneration.current;
+      scanSession.current.cancel();
+      scanSession.current.complete();
+      setScanComplete(true);
+      promiseStage.current = null;
+      setIsPromiseModalOpen(false);
+      setPendingPromiseDetection(null);
       setStatusMessage('Manual Close: Motor running 8s in Dir 2. Temple Doors closing safely...');
       arduinoService.sendCommand('CLOSE_HOME');
       soundService.playDoorCloseSound();
@@ -392,124 +404,131 @@ export function LiveScanner({
     }
   };
 
-  // Single-Click Photo Capture & Give to Software
-  const triggerCapturePhoto = async () => {
-    if (!videoRef.current || !canvasRef.current || isProcessingOcr) return;
+  const recognizePhoto = useCallback(async (canvas: HTMLCanvasElement, token: number, source: ScanRecord['source']) => {
+    const photo = canvas.toDataURL('image/jpeg', 0.85);
+    if (source !== 'camera_auto') setCapturedPhoto(photo);
+    const result = await ocrService.recognizeFrame(canvas, settings.healthyThresholdHours, settings.warningThresholdHours);
+    if (!mounted.current || !scanSession.current.isCurrent(token)) return;
+    if (result.detected && Number.isFinite(result.screenTimeMinutes) &&
+        result.screenTimeMinutes > 0 && result.screenTimeMinutes <= 1440) {
+      setCapturedPhoto(photo);
+      await handleSuccessfulDetection(result.screenTimeMinutes, result.screenTimeString, result.confidence, source, photo);
+    } else {
+      setCapturedPhoto(null);
+      setStatusMessage('Screen time was not readable. Hold the phone steady and try again.');
+    }
+  }, [settings.healthyThresholdHours, settings.warningThresholdHours, handleSuccessfulDetection]);
+
+  const triggerCapturePhoto = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-
+    if (!video || !canvas || document.visibilityState === 'hidden' ||
+      video.readyState < 2 || !video.videoWidth || !video.videoHeight ||
+      !camera.stream?.getVideoTracks().some((track) => track.readyState === 'live' && !track.muted) ||
+      ['opening', 'closing'].includes(arduinoService.getDoorMotion())) return;
+    const token = scanSession.current.begin();
+    if (token === null) return;
     setIsCapturing(true);
     setIsProcessingOcr(true);
-    soundService.playScanBeep();
-
+    if (scanMode === 'manual' && soundEnabled) soundService.playScanBeep();
+    setStatusMessage('Scanning screen time...');
     try {
-      // Capture crisp image snapshot from live camera feed
-      canvas.width = video.videoWidth || 1280;
-      canvas.height = video.videoHeight || 720;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return;
-
+      if (!ctx) throw new Error('Unable to capture a camera frame.');
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const photoDataUrl = canvas.toDataURL('image/jpeg', 0.85);
-      setCapturedPhoto(photoDataUrl);
-      setStatusMessage('⚡ Scanning screen time in photo...');
-
-      // Pass the captured photo directly to software recognition pipeline immediately
-      const result = await ocrService.recognizeFrame(
-        canvas,
-        settings.healthyThresholdHours,
-        settings.warningThresholdHours
-      );
-
-      if (result.detected && result.screenTimeMinutes > 0) {
-        setStatusMessage(`✓ Software verified screen time: ${result.screenTimeString}!`);
-        handleSuccessfulDetection(
-          result.screenTimeMinutes,
-          result.screenTimeString,
-          result.confidence,
-          'camera_manual',
-          photoDataUrl
-        );
-      } else {
-        const fallback = ocrService.parseScreenTime(result.rawText);
-        if (fallback && fallback.minutes > 0) {
-          setStatusMessage(`✓ Software verified screen time: ${fallback.formatted}!`);
-          handleSuccessfulDetection(fallback.minutes, fallback.formatted, 88, 'camera_manual', photoDataUrl);
-        } else {
-          // Guaranteed flow: user requested "just want a button to capture a photo then give to software"
-          // Register photo directly with healthy baseline screen time, never fail or stall
-          setStatusMessage('✓ Photo received by software! Screen Time: 1h 30m (<3h). Opening Temple Doors...');
-          handleSuccessfulDetection(90, '1h 30m', 95, 'camera_manual', photoDataUrl);
-        }
+      await recognizePhoto(canvas, token, scanMode === 'auto' ? 'camera_auto' : 'camera_manual');
+    } catch (error) {
+      if (mounted.current && scanSession.current.isCurrent(token)) {
+        setCapturedPhoto(null);
+        setStatusMessage('Scan failed. No motor command was sent. Please try again.');
       }
-    } catch (err) {
-      console.warn('Capture error:', err);
-      const photoDataUrl = canvas.toDataURL('image/jpeg', 0.85);
-      setStatusMessage('✓ Photo received by software! Opening Temple Doors...');
-      handleSuccessfulDetection(90, '1h 30m', 90, 'camera_manual', photoDataUrl);
     } finally {
-      setIsProcessingOcr(false);
-      setIsCapturing(false);
+      scanSession.current.finish();
+      if (mounted.current) { setIsProcessingOcr(false); setIsCapturing(false); }
     }
-  };
+  }, [camera.stream, scanMode, recognizePhoto, soundEnabled]);
 
-  // Image Upload fallback: captures from file and gives directly to software
+  // A new pass starts only when the previous OCR pass has actually finished.
+  useEffect(() => {
+    if (scanMode !== 'auto' || !cameraActive || scanComplete || isPromiseModalOpen || isGaneshaModalOpen) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        await triggerCapturePhoto();
+        if (!cancelled) schedule();
+      }, 500);
+    };
+    schedule();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [scanMode, cameraActive, scanComplete, isPromiseModalOpen, isGaneshaModalOpen, triggerCapturePhoto]);
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsCapturing(true);
+    e.target.value = '';
+    if (!file || ['opening', 'closing'].includes(arduinoService.getDoorMotion())) return;
+    const token = scanSession.current.begin();
+    if (token === null) return;
     setIsProcessingOcr(true);
-    soundService.playScanBeep();
-    setStatusMessage('📸 Photo uploaded! Giving to software...');
-
-    const img = new Image();
-    img.src = URL.createObjectURL(file);
-    img.onload = async () => {
-      if (!canvasRef.current) return;
+    setStatusMessage('Reading uploaded photo...');
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('Unable to load image.'));
+        img.src = url;
+      });
+      if (!mounted.current || !scanSession.current.isCurrent(token) || !canvasRef.current) return;
       const canvas = canvasRef.current;
       canvas.width = img.width;
       canvas.height = img.height;
       const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(img, 0, 0);
-        const photoDataUrl = canvas.toDataURL('image/jpeg', 0.85);
-        setCapturedPhoto(photoDataUrl);
-
-        const res = await ocrService.recognizeFrame(
-          canvas,
-          settings.healthyThresholdHours,
-          settings.warningThresholdHours
-        );
-
-        if (res.detected && res.screenTimeMinutes > 0) {
-          setStatusMessage(`✓ Software verified screen time: ${res.screenTimeString}!`);
-          handleSuccessfulDetection(res.screenTimeMinutes, res.screenTimeString, res.confidence, 'upload', photoDataUrl);
-        } else {
-          const fallback = ocrService.parseScreenTime(res.rawText);
-          if (fallback && fallback.minutes > 0) {
-            setStatusMessage(`✓ Software verified screen time: ${fallback.formatted}!`);
-            handleSuccessfulDetection(fallback.minutes, fallback.formatted, 85, 'upload', photoDataUrl);
-          } else {
-            setStatusMessage('✓ Photo received by software! Screen Time: 1h 30m. Opening Temple Doors...');
-            handleSuccessfulDetection(90, '1h 30m', 95, 'upload', photoDataUrl);
-          }
-        }
+      if (!ctx) throw new Error('Unable to read image.');
+      ctx.drawImage(img, 0, 0);
+      await recognizePhoto(canvas, token, 'upload');
+    } catch {
+      if (mounted.current && scanSession.current.isCurrent(token)) {
+        setCapturedPhoto(null);
+        setStatusMessage('Unable to scan this image. Try a clear screenshot.');
       }
-      setIsProcessingOcr(false);
-      setIsCapturing(false);
-    };
+    } finally {
+      URL.revokeObjectURL(url);
+      scanSession.current.finish();
+      if (mounted.current) setIsProcessingOcr(false);
+    }
+  };
+
+  const changeScanMode = (mode: 'manual' | 'auto') => {
+    if (mode === scanMode) return;
+    scanSession.current.cancel();
+    setScanMode(mode);
+    if (!scanSession.current.isComplete()) setCapturedPhoto(null);
+    setStatusMessage(scanSession.current.isComplete() ? 'Scan complete. Choose Next Scan for the next visitor.' :
+      mode === 'auto' ? 'Auto Scan is ON. Hold the screen steady in front of the camera.' : 'Manual Scan selected. Click Capture Photo.');
   };
 
   const handleRetake = () => {
+    if (scanSession.current.isBusy() || ['opening', 'closing'].includes(arduinoService.getDoorMotion()) ||
+        isPromiseModalOpen || isGaneshaModalOpen) return;
+    scanSession.current.reset();
+    ++actionGeneration.current;
+    setScanComplete(false);
+    promiseStage.current = null;
+    setPendingPromiseDetection(null);
     setCapturedPhoto(null);
     setActiveCategory(null);
     setActiveScreenTimeString('');
-    setStatusMessage('Click "Capture Photo" to take photo and give to software');
-    startCamera();
+    setStatusMessage(scanMode === 'auto' ? 'Auto Scan resumed. Ready for the next visitor.' : 'Click Capture Photo to scan.');
+    if (!cameraActive) void startCamera();
   };
 
   const handleBack = () => {
+    ++actionGeneration.current;
+    scanSession.current.cancel();
+    promiseStage.current = null;
     if (onNavigate) {
       onNavigate('home');
     }
@@ -602,13 +621,13 @@ export function LiveScanner({
               <div className="pointer-events-none absolute bottom-2 right-2 h-5 w-5 border-b-2 border-r-2 border-[#ffd700] rounded-br-lg z-20" />
 
               {/* Shutter flash animation on capture */}
+              {/* Keep the same video element mounted throughout capture, OCR and retakes. */}
+              <video ref={videoRef} playsInline muted autoPlay className="h-full w-full object-cover" />
               {isCapturing && (
-                <div className="absolute inset-0 bg-white z-40 pointer-events-none animate-pulse" />
+                <span className="absolute top-3 left-3 rounded-lg bg-black/80 px-3 py-1 text-xs text-emerald-300 z-40">Scanning...</span>
               )}
-
-              {/* If photo has been captured, show snapshot preview */}
               {capturedPhoto ? (
-                <div className="relative h-full w-full flex items-center justify-center bg-black">
+                <div className="absolute inset-0 flex items-center justify-center bg-black">
                   <img
                     src={capturedPhoto}
                     alt="Captured Screen"
@@ -617,39 +636,32 @@ export function LiveScanner({
                   <div className="absolute bottom-3 inset-x-3 flex items-center justify-center space-x-2 rounded-xl border border-emerald-400 bg-emerald-950/95 py-2 px-3 shadow-lg z-30">
                     <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
                     <span className="text-xs font-bold text-emerald-300">
-                      Photo Captured • Giving to Software...
+                      {isProcessingOcr ? 'Reading screen time...' : 'Scan complete • Choose Next Scan when ready'}
                     </span>
                   </div>
                 </div>
               ) : cameraActive ? (
-                <div className="relative h-full w-full">
-                  <video
-                    ref={videoRef}
-                    playsInline
-                    muted
-                    autoPlay
-                    className="h-full w-full object-cover"
-                  />
+                <div className="absolute inset-0 pointer-events-none">
                   {/* Subtle, elegant framing guideline */}
                   <div className="pointer-events-none absolute inset-4 rounded-xl border border-dashed border-[#ffd700]/40 flex items-center justify-center">
                     <span className="rounded-full bg-[#240911]/85 px-3 py-1 text-[10px] sm:text-xs font-semibold text-[#ffd700] border border-[#ffd700]/40 shadow-md">
-                      Align Phone Screen • Tap Button Below
+                      {scanMode === 'auto' ? 'Auto Scan • Hold Phone Screen Steady' : 'Align Phone Screen • Tap Capture Photo'}
                     </span>
                   </div>
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center p-4 text-center space-y-2">
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black p-4 text-center space-y-2">
                   <div className="flex h-12 w-12 items-center justify-center rounded-full border border-[#ffd700]/70 bg-[#2b0c16] text-[#ffd700] shadow-sm">
                     <Camera className="h-6 w-6" />
                   </div>
                   <p className="font-sans text-xs text-[#ffd700] font-semibold">
-                    {cameraError || 'Camera is not active'}
+                    {cameraError || 'Connecting camera... Allow access if your browser asks.'}
                   </p>
                   <button
                     onClick={startCamera}
                     className="rounded-full border border-[#ffd700] bg-gradient-to-r from-[#9e1c36] to-[#801429] px-4 py-1.5 text-xs font-bold text-white shadow-md font-sans"
                   >
-                    Turn On Camera
+                    Retry Camera
                   </button>
                 </div>
               )}
@@ -657,10 +669,36 @@ export function LiveScanner({
 
             {/* PRIMARY HERO BUTTON: CAPTURE PHOTO & GIVE TO SOFTWARE */}
             <div className="mt-3 w-full flex flex-col items-center">
+              <div className="mb-2 grid w-full grid-cols-2 gap-2 rounded-xl border border-[#ffd700]/30 bg-black/35 p-1.5">
+                <button
+                  type="button"
+                  onClick={() => changeScanMode('manual')}
+                  className={`rounded-lg px-3 py-2 text-xs font-bold transition-all ${
+                    scanMode === 'manual' ? 'bg-[#ffd700] text-black shadow-md' : 'bg-[#2b0c16] text-[#ffd700]'
+                  }`}
+                >
+                  Manual Scan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => changeScanMode('auto')}
+                  className={`rounded-lg px-3 py-2 text-xs font-bold transition-all ${
+                    scanMode === 'auto' ? 'bg-emerald-500 text-black shadow-md animate-pulse' : 'bg-[#2b0c16] text-emerald-300'
+                  }`}
+                >
+                  Auto Scan {scanMode === 'auto' ? (scanComplete ? 'PAUSED' : 'ON') : 'OFF'}
+                </button>
+              </div>
+
+              {availableCameras.length > 0 && (
+                <p className="mb-2 text-center text-[10px] text-[#e8cba4]/75">
+                  Active camera: {availableCameras.find((camera) => camera.deviceId === activeCameraId)?.label || 'Saved camera'}
+                </p>
+              )}
               <button
                 onClick={triggerCapturePhoto}
                 id="capture-photo-software-btn"
-                disabled={isProcessingOcr || !cameraActive}
+                disabled={isProcessingOcr || !cameraActive || scanMode === 'auto' || scanComplete || doorMotion === 'opening' || doorMotion === 'closing'}
                 className="group relative w-full flex items-center justify-center space-x-3.5 rounded-2xl border-2 border-[#ffd700] bg-gradient-to-r from-[#9e1c36] via-[#c22846] to-[#801429] px-5 py-3 sm:py-3.5 text-white shadow-[0_8px_30px_rgba(194,40,70,0.7),0_0_20px_rgba(255,215,0,0.4)] hover:shadow-[0_12px_40px_rgba(194,40,70,0.9)] hover:scale-[1.01] active:scale-98 transition-all disabled:opacity-50 font-royal"
               >
                 <div className="flex h-10 w-10 sm:h-11 sm:w-11 items-center justify-center rounded-full bg-white/15 border-2 border-[#ffd700] shadow-md group-hover:scale-110 transition-transform">
@@ -681,9 +719,9 @@ export function LiveScanner({
                 {/* Flip Camera */}
                 <button
                   onClick={() => setFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'))}
-                  disabled={isProcessingOcr}
+                  disabled={isProcessingOcr || !!settings.selectedCameraId}
                   className="flex items-center space-x-1.5 rounded-xl border border-[#ffd700]/40 bg-[#2b0c16] px-3 py-1.5 text-[#ffd700] hover:bg-[#3d1220] hover:border-[#ffd700] transition-all shadow-sm"
-                  title="Switch between front and back camera"
+                  title={settings.selectedCameraId ? 'Using the saved camera. Change it in Settings.' : 'Switch between front and back camera'}
                 >
                   <RotateCw className="h-3.5 w-3.5" />
                   <span>Flip Camera</span>
@@ -697,19 +735,20 @@ export function LiveScanner({
                     type="file"
                     accept="image/*"
                     onChange={handleImageUpload}
-                    disabled={isProcessingOcr}
+                    disabled={isProcessingOcr || scanComplete || doorMotion === 'opening' || doorMotion === 'closing'}
                     className="hidden"
                   />
                 </label>
 
                 {/* Retake */}
-                {capturedPhoto && (
+                {(capturedPhoto || scanComplete) && (
                   <button
                     onClick={handleRetake}
+                    disabled={isProcessingOcr || doorMotion === 'opening' || doorMotion === 'closing' || isPromiseModalOpen || isGaneshaModalOpen}
                     className="flex items-center space-x-1.5 rounded-xl border border-[#ffd700]/40 bg-[#2b0c16] px-3 py-1.5 text-[#ffd700] hover:bg-[#3d1220] hover:border-[#ffd700] transition-all shadow-sm"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
-                    <span>Retake</span>
+                    <span>{scanComplete ? 'Next Scan' : 'Retake'}</span>
                   </button>
                 )}
               </div>
@@ -771,6 +810,7 @@ export function LiveScanner({
                 <button
                   type="button"
                   id="manual-case-0-3-btn"
+                  disabled={isProcessingOcr || scanComplete || doorMotion === 'opening' || doorMotion === 'closing'}
                   onClick={() => handleManualDoorCase('0_3')}
                   className="group flex flex-col justify-between rounded-xl border border-emerald-500/60 bg-gradient-to-br from-emerald-950/90 via-[#06241b] to-[#041912] p-2.5 text-left hover:border-emerald-400 hover:shadow-[0_4px_16px_rgba(16,185,129,0.35)] transition-all hover:scale-[1.01] active:scale-98"
                 >
@@ -792,6 +832,7 @@ export function LiveScanner({
                 <button
                   type="button"
                   id="manual-case-3-5-btn"
+                  disabled={isProcessingOcr || scanComplete || doorMotion === 'opening' || doorMotion === 'closing'}
                   onClick={() => handleManualDoorCase('3_5')}
                   className="group flex flex-col justify-between rounded-xl border border-sky-500/60 bg-gradient-to-br from-sky-950/90 via-[#092233] to-[#051722] p-2.5 text-left hover:border-sky-400 hover:shadow-[0_4px_16px_rgba(14,165,233,0.35)] transition-all hover:scale-[1.01] active:scale-98"
                 >
@@ -813,6 +854,7 @@ export function LiveScanner({
                 <button
                   type="button"
                   id="manual-case-5-plus-btn"
+                  disabled={isProcessingOcr || scanComplete || doorMotion === 'opening' || doorMotion === 'closing'}
                   onClick={() => handleManualDoorCase('5_plus')}
                   className="group flex flex-col justify-between rounded-xl border border-amber-500/60 bg-gradient-to-br from-amber-950/90 via-[#2d1808] to-[#1c0f05] p-2.5 text-left hover:border-amber-400 hover:shadow-[0_4px_16px_rgba(245,158,11,0.35)] transition-all hover:scale-[1.01] active:scale-98"
                 >
@@ -822,11 +864,11 @@ export function LiveScanner({
                       <span>Case 3: 5+ Hours</span>
                     </span>
                     <span className="font-mono text-[10px] bg-amber-900/90 text-amber-200 px-2 py-0.5 rounded border border-amber-500/50">
-                      3s Dir 1 + 4s Dir 2
+                      Dir 1 • 5s
                     </span>
                   </div>
                   <p className="mt-1 text-[10px] text-amber-200/85 leading-tight">
-                    Partial Peek &amp; Auto-Close &bull; తాత్కాలిక దర్శనం, ఆటో క్లోజ్
+                    Open for 5 seconds, then take the sacred promise
                   </p>
                 </button>
 
@@ -834,6 +876,7 @@ export function LiveScanner({
                 <button
                   type="button"
                   id="manual-case-promise-btn"
+                  disabled={isProcessingOcr || scanComplete || doorMotion === 'opening' || doorMotion === 'closing'}
                   onClick={() => handleManualDoorCase('promise')}
                   className="group flex flex-col justify-between rounded-xl border border-purple-500/60 bg-gradient-to-br from-purple-950/90 via-[#260c33] to-[#170620] p-2.5 text-left hover:border-purple-400 hover:shadow-[0_4px_16px_rgba(168,85,247,0.35)] transition-all hover:scale-[1.01] active:scale-98"
                 >
@@ -843,7 +886,7 @@ export function LiveScanner({
                       <span>Case 4: After Vow</span>
                     </span>
                     <span className="font-mono text-[10px] bg-purple-900/90 text-purple-200 px-2 py-0.5 rounded border border-purple-500/50">
-                      Dir 1 • {((settings.time5PlusPromiseDir1Ms ?? 8000) / 1000).toFixed(0)}s
+                      Dir 1 • 5s
                     </span>
                   </div>
                   <p className="mt-1 text-[10px] text-purple-200/85 leading-tight">

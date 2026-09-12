@@ -38,7 +38,7 @@ export function App() {
     return 'home';
   });
   const [selectedAgeGroup, setSelectedAgeGroup] = useState<UserAgeGroup | null>(null);
-  const [settings, setSettings] = useState<DashboardSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<DashboardSettings>(() => storageService.getSettings());
   const [isTipsModalOpen, setIsTipsModalOpen] = useState<boolean>(false);
   const [arduinoConnected, setArduinoConnected] = useState<boolean>(false);
   const [showNavDrawer, setShowNavDrawer] = useState<boolean>(false);
@@ -51,7 +51,7 @@ export function App() {
 
     // 2. Hydrate persisted media blobs & deep settings from IndexedDB
     storageService.loadPersistedSettings().then((hydrated) => {
-      setSettings(hydrated);
+      setSettings({ ...hydrated, selectedCameraId: storageService.getSettings().selectedCameraId });
       soundService.setMuted(!hydrated.soundEnabled);
     }).catch(() => {});
 

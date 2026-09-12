@@ -14,7 +14,7 @@ type SerialListener = (status: {
   doorMotion: 'idle' | 'opening' | 'open' | 'closing' | 'closed';
 }) => void;
 
-class ArduinoService {
+export class ArduinoService {
   private port: any = null;
   private writer: any = null;
   private reader: any = null;
@@ -28,6 +28,8 @@ class ArduinoService {
   private isReading: boolean = false;
   private autoStopTimer: any = null;
   private intermediateTimers: any[] = [];
+  private writeQueue: Promise<unknown> = Promise.resolve();
+  private lastMotionTimestamp = 0;
 
   // Door & Relay LED hardware state trackers
   private isDoorOpen: boolean = false;
@@ -226,19 +228,24 @@ class ArduinoService {
   }
 
   public async writeRaw(text: string): Promise<boolean> {
-    if (this.port && this.port.writable) {
+    const port = this.port;
+    const write = this.writeQueue.then(async () => {
+      if (!port?.writable || port !== this.port) return false;
+      let writer: any;
       try {
         const textEncoder = new TextEncoder();
-        const writer = this.port.writable.getWriter();
+        writer = port.writable.getWriter();
         await writer.write(textEncoder.encode(text));
-        writer.releaseLock();
         return true;
       } catch (err: any) {
         this.addLog('SYS', `Write failed: ${err.message}`);
         return false;
+      } finally {
+        writer?.releaseLock();
       }
-    }
-    return false;
+    });
+    this.writeQueue = write.catch(() => {});
+    return write;
   }
 
   public async sendCommand(command: ArduinoCommand, customDurationMs?: number): Promise<boolean> {
@@ -248,12 +255,16 @@ class ArduinoService {
     if (
       (command === 'CLOSE_HOME' || command === 'CLOSE') &&
       this.doorMotion === 'closing' &&
-      now - (this.lastCommandTimestamp || 0) < 2000
+      now - this.lastMotionTimestamp < 2000
     ) {
       return true;
     }
 
-    this.clearAutoTimers();
+    const relayOnly = ['RELAY_ON', 'RELAY_OFF', 'LED_ON', 'LED_OFF'].includes(command);
+    if (!relayOnly) {
+      this.clearAutoTimers();
+      this.lastMotionTimestamp = now;
+    }
     this.lastCommand = command;
     this.lastCommandTimestamp = now;
 
@@ -284,7 +295,7 @@ class ArduinoService {
     //   - Relay Pin D4 turns ON at the 5th second (lighting the Sanctum LED)
     //   - At 8 sec full door open, Relay D4 remains ON and video plays
     // When closing: D4 stays ON while the doors swing closed, and ONLY turns OFF when the doors have fully shut!
-    const isStandardOpen = command === 'OPEN_0_3' || command === 'OPEN_3_5' || command === 'OPEN_FULL' || command === 'OPEN_AFTER_PROMISE';
+    const isStandardOpen = command === 'OPEN_0_3' || command === 'OPEN_3_5' || command === 'OPEN_SLOW' || command === 'OPEN_FULL' || command === 'OPEN_AFTER_PROMISE';
     if (isStandardOpen) {
       this.doorMotion = 'opening';
       this.isDoorOpen = true;
@@ -341,12 +352,12 @@ class ArduinoService {
           this.isRelayOn = true; // Ensure Relay D4 remains solidly ON
           this.addLog(
             'SYS',
-            `[Full Door Open (8.0s)] Doors are FULLY OPEN on Relay D4. Darshanam video & audio playing.`
+            `[Opening complete (${(targetDurationMs / 1000).toFixed(1)}s)] Motors stopped; opening cycle complete.`
           );
           if (this.port && this.port.writable) {
             await this.writeRaw('MOTOR_STOP\n').catch(() => {});
           }
-          this.addLog('RX', `ARDUINO: Opening motion complete (8s). Motors Halted. Doors FULL OPEN & Relay D4 ON.`);
+          this.addLog('SYS', `Opening timer complete (${targetDurationMs / 1000}s). Motor stop requested; Relay D4 ON.`);
           this.notify();
         }, targetDurationMs);
       } else if (command === 'OPEN_5_PLUS' || command === 'OPEN_20_CLOSE' || command === 'OPEN_PARTIAL') {
@@ -408,8 +419,19 @@ class ArduinoService {
     // If physically connected via Web Serial
     if (this.port && this.port.writable) {
       try {
-        await this.writeRaw(`${command}\n`);
-        return true;
+        // The generated Arduino firmware accepts COMMAND:durationMs.
+        // Send the requested duration to physical hardware instead of applying it only to UI timers.
+        // Always include the single-stroke duration: firmware remembers previous overrides.
+        const serialCommand = targetDurationMs > 0 && (isStandardOpen || command === 'CLOSE_HOME' || command === 'CLOSE')
+          ? `${command}:${Math.round(targetDurationMs)}`
+          : command;
+        const sent = await this.writeRaw(`${serialCommand}\n`);
+        if (!sent && !relayOnly) {
+          this.clearAutoTimers();
+          this.doorMotion = 'idle';
+          this.addLog('SYS', 'Motor command was not delivered. Check the USB connection.');
+        }
+        return sent;
       } catch (err: any) {
         this.addLog('SYS', `Write failed: ${err.message}`);
         return false;

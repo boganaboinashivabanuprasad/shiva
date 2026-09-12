@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ScreenTimeCategory, CATEGORY_DETAILS, DashboardSettings } from '../types';
 import { soundService } from '../services/soundService';
-import { arduinoService } from '../services/arduinoService';
 import { GaneshaAiVideoPlayer } from './GaneshaAiVideoPlayer';
 import {
   Sparkles,
@@ -47,13 +46,9 @@ export function GaneshaFullPopupModal({
 }: GaneshaFullPopupModalProps) {
   const currentDetails = CATEGORY_DETAILS[category] || CATEGORY_DETAILS['1_TO_3_DAYS'];
 
-  // Trigger celebration & just on relay and motors in D1 before video
+  // The scanner owns motor commands; opening a popup must not restart the motor timer.
   useEffect(() => {
     if (isOpen) {
-      // Initiate door opening in Direction 1 (8s stroke, relay ON at 5th second)
-      const cmd = category === '3_TO_5_HOURS' || category === '3_TO_5_DAYS' ? 'OPEN_3_5' : 'OPEN_0_3';
-      arduinoService.sendCommand(cmd);
-
       if (category === '0_TO_3_HOURS' || category === '1_TO_3_DAYS' || category === 'HEALTHY') {
         confetti({
           particleCount: 100,

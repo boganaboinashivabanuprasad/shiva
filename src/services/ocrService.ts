@@ -48,6 +48,7 @@ class OcrService {
     healthyThreshold = 3,
     warningThreshold = 5
   ): Promise<OcrDetectionResult | null> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       // Downscale image to compact size (max 640px) for blazing fast upload (<30ms) while keeping digits crisp
       const MAX_DIM = 640;
@@ -70,7 +71,7 @@ class OcrService {
 
       // Fast abort controller (max 2200ms) so recognition never hangs
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2200);
+      timeoutId = setTimeout(() => controller.abort(), 2200);
 
       const response = await fetch('/api/ocr/analyze-screen', {
         method: 'POST',
@@ -90,14 +91,14 @@ class OcrService {
       }
 
       const data = await response.json();
-      if (data && data.detected && data.totalMinutes > 0) {
+      if (data && data.detected && Number.isFinite(data.totalMinutes) && data.totalMinutes > 0 && data.totalMinutes <= 1440) {
         const category = this.classifyMinutes(data.totalMinutes, healthyThreshold, warningThreshold);
         return {
           detected: true,
           rawText: data.rawSnippet || data.formatted || '',
           screenTimeMinutes: data.totalMinutes,
           screenTimeString: data.formatted || `${data.hours}h ${data.minutes}m`,
-          confidence: Math.max(data.confidence || 95, 90),
+          confidence: Number.isFinite(data.confidence) ? Math.min(100, Math.max(0, data.confidence)) : 0,
           category,
           deviceOrAppType: data.deviceOrAppType || 'Digital Wellbeing',
           sourceEngine: 'gemini_vision_ai',
@@ -109,6 +110,8 @@ class OcrService {
     } catch (err) {
       // Abort or network failure: immediately proceed to fallback
       return null;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -347,7 +350,7 @@ class OcrService {
     const hours = minutes / 60;
     if (hours <= healthyThreshold) {
       return '0_TO_3_HOURS';
-    } else if (hours <= warningThreshold) {
+    } else if (hours < warningThreshold) {
       return '3_TO_5_HOURS';
     } else {
       return '5_PLUS_HOURS';
@@ -356,7 +359,7 @@ class OcrService {
 
   /**
    * Process a live video canvas or image element:
-   * First calls AI Vision (Gemini 3.7 Flash) for 100% precision with tilted mobile screens.
+   * First calls the server vision endpoint, then falls back to client-side OCR.
    * If offline or fallback needed, runs enhanced client-side Tesseract OCR.
    */
   public async recognizeFrame(
@@ -389,22 +392,20 @@ class OcrService {
       const canvases = this.generateProcessedCanvases(canvas);
       const targetCanvas = canvases[2] || canvas; // Center crop
 
-      const result = await Promise.race([
-        worker.recognize(targetCanvas),
-        new Promise<null>((r) => setTimeout(() => r(null), 1500)),
-      ]);
+      // Await completion; abandoning a promise does not cancel a Tesseract job.
+      const result = await worker.recognize(targetCanvas);
 
       if (result && result.data && result.data.text) {
         const text = result.data.text || '';
         const parsed = this.parseScreenTime(text, healthyThreshold, warningThreshold);
-        if (parsed) {
+        if (parsed && parsed.minutes > 0 && parsed.minutes <= 1440) {
           const category = this.classifyMinutes(parsed.minutes, healthyThreshold, warningThreshold);
           return {
             detected: true,
             rawText: text.trim(),
             screenTimeMinutes: parsed.minutes,
             screenTimeString: parsed.formatted,
-            confidence: Math.max(result.data.confidence || 85, 80),
+            confidence: result.data.confidence || 0,
             category,
             sourceEngine: 'tesseract_client',
           };
@@ -435,4 +436,3 @@ class OcrService {
 }
 
 export const ocrService = new OcrService();
-
