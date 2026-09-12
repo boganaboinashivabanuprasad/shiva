@@ -64,6 +64,7 @@ export interface AgeBasedVideosConfig {
 export interface DashboardSettings {
   healthyThresholdHours: number; // default: 3 (0-3 Hours)
   warningThresholdHours: number; // default: 5 (3-5 Hours)
+  highRiskThresholdHours: number;
 
   // --- Hardware Motor & Timing Configuration ---
   // 1. Screen Time 0-3h: runs for 8s in Direction 1 (for every user)
